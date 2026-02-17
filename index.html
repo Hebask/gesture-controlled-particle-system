@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Liquid Glow Saturn</title>
+    <style>
+        body { margin: 0; background: #000; overflow: hidden; }
+        #video { position: absolute; bottom: 20px; left: 20px; width: 150px; border-radius: 10px; opacity: 0.4; transform: scaleX(-1); border: 1px solid #fbff00; }
+        #status { position: absolute; top: 20px; width: 100%; text-align: center; color: #fbff00; font-family: 'Orbitron', sans-serif; font-size: 1.5rem; text-shadow: 0 0 10px #fbff00; pointer-events: none; z-index: 10; }
+    </style>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div id="status">✨ CALIBRATING GALAXY... ✨</div>
+    <video id="video" autoplay playsinline></video>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+    <script>
+        // --- 1. THE ENGINE ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+        camera.position.z = 10;
+
+        // --- 2. THE GEOMETRY (Creating the Shapes) ---
+        const count = 15000;
+        const geo = new THREE.BufferGeometry();
+        const posStart = new Float32Array(count * 3); // Stardust cloud
+        const posEnd = new Float32Array(count * 3);   // Saturn shape
+
+        for (let i = 0; i < count; i++) {
+            const i3 = i * 3;
+            
+            // Shape 1: Stardust Nebula
+            const angle = i * 0.1;
+            const r = 5 + Math.random() * 5;
+            posStart[i3] = Math.cos(angle) * r;
+            posStart[i3+1] = Math.sin(angle) * r;
+            posStart[i3+2] = (Math.random() - 0.5) * 10;
+
+            // Shape 2: Saturn
+            if (i < count * 0.6) { // Planet
+                const phi = Math.acos(-1 + (2 * i) / (count * 0.6));
+                const theta = Math.sqrt(count * 0.6 * Math.PI) * phi;
+                posEnd[i3] = 2.0 * Math.cos(theta) * Math.sin(phi);
+                posEnd[i3+1] = 2.0 * Math.sin(theta) * Math.sin(phi);
+                posEnd[i3+2] = 2.0 * Math.cos(phi);
+            } else { // Rings
+                const a = Math.random() * Math.PI * 2;
+                const rInner = 3.2 + Math.random() * 1.5;
+                posEnd[i3] = Math.cos(a) * rInner;
+                posEnd[i3+1] = (Math.random() - 0.5) * 0.1;
+                posEnd[i3+2] = Math.sin(a) * rInner;
+            }
+        }
+
+        geo.setAttribute('position', new THREE.BufferAttribute(posStart, 3));
+        geo.setAttribute('aTarget', new THREE.BufferAttribute(posEnd, 3));
+
+        // --- 3. THE MAGIC GLOW SHADER ---
+        const material = new THREE.ShaderMaterial({
+            uniforms: {
+                uTime: { value: 0 },
+                uMorph: { value: 0 }, // 0 = Stardust, 1 = Saturn
+                uHandPos: { value: new THREE.Vector3(0, 0, 0) }
+            },
+            vertexShader: `
+                uniform float uTime;
+                uniform float uMorph;
+                uniform vec3 uHandPos;
+                attribute vec3 aTarget;
+                void main() {
+                    // Smoothly morph between shapes on the GPU
+                    vec3 morphed = mix(position, aTarget, uMorph);
+                    
+                    // Add subtle floating motion
+                    morphed.y += sin(uTime + morphed.x) * 0.2;
+                    
+                    // Magnet: Move everything to follow the hand
+                    vec4 mvPos = modelViewMatrix * vec4(morphed + uHandPos, 1.0);
+                    
+                    gl_PointSize = 16.0 * (1.0 / -mvPos.z);
+                    gl_Position = projectionMatrix * mvPos;
+                }
+            `,
+            fragmentShader: `
+                void main() {
+                    float d = distance(gl_PointCoord, vec2(0.5));
+                    if (d > 0.5) discard;
+                    // Create a hot glowing center
+                    float glow = pow(1.0 - d * 2.0, 4.0);
+                    gl_FragColor = vec4(1.0, 0.9, 0.4, glow);
+                }
+            `,
+            transparent: true,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+        });
+
+        const points = new THREE.Points(geo, material);
+        scene.add(points);
+        points.rotation.x = 0.3; // Tilt for the rings
+
+        // --- 4. THE HAND AI ---
+        let targetMorph = 0;
+        let smoothHand = new THREE.Vector3();
+
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.6 });
+        
+        hands.onResults((res) => {
+            if (res.multiHandLandmarks && res.multiHandLandmarks[0]) {
+                const h = res.multiHandLandmarks[0];
+                
+                // Track hand position (Mapping 0-1 camera to 3D world)
+                const tx = (0.5 - h[9].x) * 18;
+                const ty = (0.5 - h[9].y) * -12;
+                smoothHand.set(tx, ty, 0);
+
+                // Pinch detection
+                const dist = Math.hypot(h[8].x - h[4].x, h[8].y - h[4].y);
+                targetMorph = dist < 0.15 ? 1 : 0;
+                
+                document.getElementById('status').innerText = targetMorph > 0.5 ? "🪐 SATURN FORMED" : "✨ STARDUST CLOUD";
+            } else {
+                document.getElementById('status').innerText = "👋 SHOW YOUR HAND";
+            }
+        });
+
+        const cam = new Camera(document.getElementById('video'), {
+            onFrame: async () => { await hands.send({image: video}); },
+            width: 640, height: 480
+        });
+        cam.start();
+
+        // --- 5. THE ANIMATION LOOP ---
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = performance.now() * 0.001;
+            
+            material.uniforms.uTime.value = time;
+            
+            // Smoothly slide the Morph value (The flow!)
+            material.uniforms.uMorph.value += (targetMorph - material.uniforms.uMorph.value) * 0.1;
+            
+            // Smoothly slide the Hand Position (The magnet!)
+            material.uniforms.uHandPos.value.lerp(smoothHand, 0.1);
+            
+            points.rotation.y += 0.005;
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.onresize = () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        };
+    </script>
+</body>
+</html>
